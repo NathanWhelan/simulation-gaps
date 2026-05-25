@@ -252,7 +252,6 @@ def introduce_random_gaps(sequences, taxa_order, percentages, gap_char="-", seed
         random.seed(seed)
 
     modified = {}
-    alignment_length = len(sequences[taxa_order[0]]) if taxa_order else 0
 
     for taxon in taxa_order:
         seq_list = list(sequences[taxon])
@@ -315,7 +314,7 @@ def write_phylip(sequences, taxa_order, filepath):
             f.write(f"{taxon} {sequences[taxon]}\n")
 
 
-def summarize_missingness(sequences, taxa_order, label=""):
+def summarize_missingness(sequences, taxa_order, label="", gap_char="-"):
     """Print a summary of missing data in an alignment.
 
     Parameters
@@ -326,12 +325,15 @@ def summarize_missingness(sequences, taxa_order, label=""):
         Ordered list of taxon names.
     label : str
         Label for the summary output.
+    gap_char : str
+        The gap character used for missing data.
     """
     if not taxa_order:
         return
 
     alignment_length = len(sequences[taxa_order[0]])
     gap_chars = set("-?Xx")
+    gap_chars.add(gap_char)
 
     print(f"\n{'=' * 60}")
     print(f"Missingness Summary: {label}")
@@ -426,6 +428,18 @@ Percentages file format (tab-delimited):
 
     args = parser.parse_args()
 
+    # Validate input files exist
+    if not Path(args.alignment).is_file():
+        print(
+            f"Error: Alignment file not found: '{args.alignment}'", file=sys.stderr
+        )
+        sys.exit(1)
+    if not Path(args.percentages).is_file():
+        print(
+            f"Error: Percentages file not found: '{args.percentages}'", file=sys.stderr
+        )
+        sys.exit(1)
+
     # Parse input alignment
     sequences, taxa_order = parse_alignment(args.alignment)
 
@@ -489,8 +503,15 @@ Percentages file format (tab-delimited):
         out_ext = output_path.suffix.lower()
         if out_ext in (".phy", ".phylip"):
             out_format = "phylip"
-        else:
+        elif out_ext in (".fasta", ".fa", ".fas", ".fna", ".faa"):
             out_format = "fasta"
+        else:
+            # Fall back to input format
+            in_ext = Path(args.alignment).suffix.lower()
+            if in_ext in (".phy", ".phylip"):
+                out_format = "phylip"
+            else:
+                out_format = "fasta"
 
     # Write output
     if out_format == "phylip":
@@ -502,7 +523,9 @@ Percentages file format (tab-delimited):
 
     # Print summaries if requested
     if args.summary:
-        summarize_missingness(modified_seqs, taxa_order, "Output (with random gaps)")
+        summarize_missingness(
+            modified_seqs, taxa_order, "Output (with random gaps)", args.gap_char
+        )
 
 
 if __name__ == "__main__":
