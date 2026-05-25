@@ -110,6 +110,53 @@ python introduce_gaps.py real_alignment.fasta simulated_alignment.fasta \
     -o simulated_with_realistic_gaps.fasta --summary
 ```
 
+## Random Per-Individual Missing Data
+
+A second script, `introduce_gaps_random.py`, introduces missing data **randomly** on a per-individual basis according to percentages specified in a tab-delimited file. Unlike the original script (which copies an empirical gap pattern), this script inserts gaps at random positions independently for each individual, so the missing data pattern for one individual is unrelated to any other.
+
+### Usage
+
+```bash
+python introduce_gaps_random.py simulated.phy percentages.tsv -o output.phy
+```
+
+### Percentages File Format
+
+A tab-delimited file with two columns (no header required):
+
+```
+taxon1	25.0
+taxon2	10.5
+taxon3	50.0
+```
+
+Each line specifies the taxon name and the percentage of sites (0–100) to replace with missing data.
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `alignment` | Simulated alignment with no missing data (FASTA or relaxed PHYLIP) |
+| `percentages` | Tab-delimited file: taxon_name, percent_missing |
+| `-o`, `--output` | Output file path (required) |
+| `--output-format` | Force output format: `fasta` or `phylip` (default: auto-detect from extension) |
+| `--gap-char` | Character to use for gaps (default: `-`) |
+| `--seed` | Random seed for reproducibility |
+| `--summary` | Print detailed missingness statistics |
+
+### Examples
+
+```bash
+# Basic usage with a relaxed PHYLIP file
+python introduce_gaps_random.py simulated.phy percentages.tsv -o output.phy
+
+# Use a random seed for reproducibility
+python introduce_gaps_random.py simulated.fasta percentages.tsv -o output.fasta --seed 42
+
+# Show missingness summary
+python introduce_gaps_random.py simulated.phy percentages.tsv -o output.phy --summary
+```
+
 ## License
 
 MIT

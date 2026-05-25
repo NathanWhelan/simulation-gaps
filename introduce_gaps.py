@@ -338,7 +338,7 @@ def apply_gap_mask_proportional(sequences, taxa_order, gap_mask, gap_char="-"):
     return modified
 
 
-def summarize_missingness(sequences, taxa_order, label=""):
+def summarize_missingness(sequences, taxa_order, label="", gap_char="-"):
     """Print a summary of missing data in an alignment.
 
     Parameters
@@ -349,12 +349,15 @@ def summarize_missingness(sequences, taxa_order, label=""):
         Ordered list of taxon names.
     label : str
         Label for the summary output.
+    gap_char : str
+        The gap character used for missing data.
     """
     if not taxa_order:
         return
 
     alignment_length = len(sequences[taxa_order[0]])
     gap_chars = set("-?Xx")
+    gap_chars.add(gap_char)
 
     print(f"\n{'=' * 60}")
     print(f"Missingness Summary: {label}")
@@ -468,6 +471,19 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # Validate input files exist
+    if not Path(args.reference).is_file():
+        print(
+            f"Error: Reference file not found: '{args.reference}'", file=sys.stderr
+        )
+        sys.exit(1)
+    if not Path(args.simulated).is_file():
+        print(
+            f"Error: Simulated alignment file not found: '{args.simulated}'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Parse input alignments
     ref_seqs, ref_taxa = parse_alignment(args.reference)
@@ -596,8 +612,10 @@ Examples:
 
     # Print summaries if requested
     if args.summary:
-        summarize_missingness(ref_seqs, ref_taxa, "Reference (empirical)")
-        summarize_missingness(modified_seqs, sim_taxa, "Output (simulated + gaps)")
+        summarize_missingness(ref_seqs, ref_taxa, "Reference (empirical)", args.gap_char)
+        summarize_missingness(
+            modified_seqs, sim_taxa, "Output (simulated + gaps)", args.gap_char
+        )
 
 
 if __name__ == "__main__":
