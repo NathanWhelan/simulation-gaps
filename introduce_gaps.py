@@ -61,6 +61,14 @@ def parse_fasta(filepath):
                 if current_taxon is not None:
                     sequences[current_taxon] = "".join(current_seq)
                 current_taxon = line[1:].split()[0]
+                if current_taxon in sequences:
+                    print(
+                        f"Warning: Duplicate taxon '{current_taxon}' in FASTA file. "
+                        f"Only the last occurrence will be used.",
+                        file=sys.stderr,
+                    )
+                    # Remove the earlier occurrence from taxa_order
+                    taxa_order = [t for t in taxa_order if t != current_taxon]
                 taxa_order.append(current_taxon)
                 current_seq = []
             else:
@@ -94,11 +102,17 @@ def parse_phylip(filepath):
 
     header = lines[0].split()
     ntaxa = int(header[0])
-    # nchar = int(header[1])  # Not strictly needed for parsing
+    nchar = int(header[1])
 
-    # Try sequential format first
+    # Parse the first block: each line has "taxon_name sequence_data"
     idx = 1
     for i in range(ntaxa):
+        if idx >= len(lines):
+            print(
+                f"Error: Expected {ntaxa} taxa but file ended after {i}.",
+                file=sys.stderr,
+            )
+            break
         parts = lines[idx].split(None, 1)
         taxon = parts[0]
         seq = parts[1].replace(" ", "") if len(parts) > 1 else ""
@@ -106,12 +120,34 @@ def parse_phylip(filepath):
         sequences[taxon] = seq
         idx += 1
 
-    # Check for interleaved data (more lines after initial block)
-    while idx < len(lines):
-        for i, taxon in enumerate(taxa_order):
-            if idx < len(lines):
-                sequences[taxon] += lines[idx].replace(" ", "")
-                idx += 1
+    # Determine if this is sequential or interleaved based on nchar.
+    # In sequential format, each taxon's full sequence follows its name
+    # (possibly on multiple lines). In interleaved, all taxa appear in
+    # blocks of equal length.
+    first_seq_len = len(sequences[taxa_order[0]]) if taxa_order else 0
+
+    if first_seq_len >= nchar:
+        # Sequential format: first block already has complete sequences.
+        # Truncate to nchar in case of trailing whitespace issues.
+        for taxon in taxa_order:
+            sequences[taxon] = sequences[taxon][:nchar]
+    elif idx < len(lines):
+        # Need more data. Determine if sequential-multiline or interleaved.
+        # Heuristic: if after the first block we have exactly ntaxa taxa
+        # and the next lines don't look like taxon names (no match to known
+        # taxa), treat as sequential-multiline. Otherwise, interleaved.
+        #
+        # Standard approach: try interleaved (most common multi-block format).
+        # In interleaved, subsequent blocks have sequence data only (no names).
+        while idx < len(lines):
+            for taxon in taxa_order:
+                if idx < len(lines):
+                    sequences[taxon] += lines[idx].replace(" ", "")
+                    idx += 1
+
+        # Truncate to nchar
+        for taxon in taxa_order:
+            sequences[taxon] = sequences[taxon][:nchar]
 
     return sequences, taxa_order
 
@@ -284,6 +320,10 @@ def apply_gap_mask_proportional(sequences, taxa_order, gap_mask, gap_char="-"):
     sim_length = len(sequences[taxa_order[0]])
     mask_length = len(gap_mask)
 
+    # If the mask is empty, return sequences unmodified
+    if mask_length == 0 or sim_length == 0:
+        return {taxon: sequences[taxon] for taxon in taxa_order}
+
     modified = {}
     for taxon in taxa_order:
         seq_list = list(sequences[taxon])
@@ -438,6 +478,37 @@ Examples:
         sys.exit(1)
     if not sim_seqs:
         print("Error: Simulated alignment is empty.", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate that all sequences within each alignment have the same length
+    ref_lengths = {taxon: len(seq) for taxon, seq in ref_seqs.items()}
+    if len(set(ref_lengths.values())) > 1:
+        print(
+            "Error: Reference alignment has sequences of different lengths "
+            "(not a valid alignment).",
+            file=sys.stderr,
+        )
+        for taxon, length in ref_lengths.items():
+            if length != len(ref_seqs[ref_taxa[0]]):
+                print(
+                    f"  {taxon}: {length} (expected {len(ref_seqs[ref_taxa[0]])})",
+                    file=sys.stderr,
+                )
+        sys.exit(1)
+
+    sim_lengths = {taxon: len(seq) for taxon, seq in sim_seqs.items()}
+    if len(set(sim_lengths.values())) > 1:
+        print(
+            "Error: Simulated alignment has sequences of different lengths "
+            "(not a valid alignment).",
+            file=sys.stderr,
+        )
+        for taxon, length in sim_lengths.items():
+            if length != len(sim_seqs[sim_taxa[0]]):
+                print(
+                    f"  {taxon}: {length} (expected {len(sim_seqs[sim_taxa[0]])})",
+                    file=sys.stderr,
+                )
         sys.exit(1)
 
     # Find common taxa
