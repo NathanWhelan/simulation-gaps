@@ -1,1 +1,115 @@
 # simulation-gaps
+
+Introduce realistic missing data (gaps) into simulated phylogenetic sequence alignments by copying the gap pattern from an empirical (reference) alignment.
+
+## Motivation
+
+When simulating phylogenetic data (e.g., amino acid alignments), the simulated sequences typically contain no missing data. However, real alignments often have substantial missing data with complex patterns — certain sites may be missing for many taxa while others are complete. Simply introducing random gaps doesn't capture this structure.
+
+This tool solves that problem by transferring the **per-site missingness pattern** from a real (reference) alignment onto a simulated alignment with the same taxa. This preserves:
+
+- Which taxa are missing at each alignment column
+- The correlation of missingness across taxa at the same position
+- The overall distribution of gaps across the alignment
+
+## Requirements
+
+- Python 3.7+
+- No external dependencies (uses only the Python standard library)
+
+## Installation
+
+Clone this repository:
+
+```bash
+git clone https://github.com/NathanWhelan/simulation-gaps.git
+cd simulation-gaps
+```
+
+No additional installation is needed.
+
+## Usage
+
+```bash
+python introduce_gaps.py reference.fasta simulated.fasta -o output.fasta
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `reference` | Empirical alignment with realistic gap pattern (FASTA or PHYLIP) |
+| `simulated` | Simulated alignment to introduce gaps into (FASTA or PHYLIP) |
+| `-o`, `--output` | Output file path (required) |
+| `--output-format` | Force output format: `fasta` or `phylip` (default: auto-detect from extension) |
+| `--gap-char` | Character to use for gaps (default: `-`) |
+| `--proportional` | Use proportional column mapping when alignments differ in length |
+| `--summary` | Print detailed missingness statistics |
+| `--strict` | Exit with error if any reference taxon is missing from simulated alignment |
+
+### Examples
+
+Basic usage — apply gap pattern from an empirical alignment to simulated data:
+
+```bash
+python introduce_gaps.py empirical.fasta simulated.fasta -o simulated_with_gaps.fasta
+```
+
+Show missingness summary statistics:
+
+```bash
+python introduce_gaps.py empirical.fasta simulated.fasta -o output.fasta --summary
+```
+
+Use proportional mapping when alignments differ in length:
+
+```bash
+python introduce_gaps.py empirical.fasta simulated.fasta -o output.fasta --proportional
+```
+
+Use `?` instead of `-` for the gap character:
+
+```bash
+python introduce_gaps.py empirical.fasta simulated.fasta -o output.fasta --gap-char '?'
+```
+
+## How It Works
+
+1. **Parse** the reference (empirical) alignment and the simulated alignment.
+2. **Extract the gap mask**: For each column in the reference alignment, determine which taxa have missing data (characters: `-`, `?`, `X`, `x`).
+3. **Match taxa**: Find taxa that are common between the reference and simulated alignments.
+4. **Apply the gap mask**: For each column in the simulated alignment, replace the amino acid with the gap character for all taxa that were missing at that position in the reference.
+5. **Write** the modified alignment.
+
+### Column Mapping Modes
+
+- **Direct mapping** (default): Column *i* in the simulated alignment gets the gap mask from column *i* in the reference. If alignments differ in length, extra columns in the longer alignment are unaffected.
+- **Proportional mapping** (`--proportional`): Columns are mapped proportionally, so that the spatial distribution of gaps is stretched/compressed to fit the simulated alignment length.
+
+## Supported Formats
+
+- **FASTA** (`.fasta`, `.fa`, `.fas`, `.fna`, `.faa`)
+- **PHYLIP** (`.phy`, `.phylip`) — sequential and interleaved
+
+## Input Requirements
+
+- Taxa names must match between the reference and simulated alignments.
+- The reference alignment should contain realistic missing data (gaps).
+- The simulated alignment typically has no gaps (complete sequences).
+- Both alignments should be aligned (all sequences same length within each file).
+
+## Example Workflow
+
+1. **Obtain empirical data**: Download a real amino acid alignment for your taxa of interest.
+2. **Simulate data**: Use a phylogenetic simulator (e.g., Seq-Gen, INDELible, pyvolve) to generate complete sequences for the same taxa.
+3. **Introduce gaps**: Use this tool to apply the empirical gap pattern to the simulated data.
+
+```bash
+# Step 3: Apply the empirical gap pattern
+python introduce_gaps.py real_alignment.fasta simulated_alignment.fasta \
+    -o simulated_with_realistic_gaps.fasta --summary
+```
+
+## License
+
+MIT
