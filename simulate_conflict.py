@@ -982,18 +982,23 @@ def _write_alignment_file(sequences, taxa_order, filepath):
                     f.write(seq[i:i + 80] + "\n")
 
 
-def concatenate_phylip_files(input_files, output_file):
-    """Concatenate multiple PHYLIP alignment files.
+def concatenate_phylip_files(input_files, output_file, partition_file=None, datatype="aa"):
+    """Concatenate multiple alignment files, handling missing taxa.
 
-    All files must have the same taxa (in the same order).
-    This is a simple concatenation without requiring FASconCAT.
+    Taxa do not need to be present in all files. Missing taxa will be filled
+    with gap characters ('-') for that locus. Output is relaxed non-interleaved
+    PHYLIP format. Optionally outputs a partition file for IQ-TREE.
 
     Parameters
     ----------
     input_files : list of str/Path
-        Paths to the PHYLIP files to concatenate.
+        Paths to the alignment files to concatenate.
     output_file : str or Path
-        Path for the concatenated output.
+        Path for the concatenated output (relaxed non-interleaved PHYLIP).
+    partition_file : str or Path or None
+        If provided, write an IQ-TREE-compatible partition file.
+    datatype : str
+        Data type for the partition file ('aa' or 'dna').
 
     Returns
     -------
@@ -1004,9 +1009,9 @@ def concatenate_phylip_files(input_files, output_file):
         print_warning("No files to concatenate.")
         return False
 
-    all_sequences = {}
-    taxa_order = None
-    total_length = 0
+    # First pass: collect the union of all taxa across all files
+    all_taxa_set = set()
+    file_data = []  # list of (seqs_dict, seq_length, filename)
 
     for fpath in input_files:
         seqs, taxa = _parse_alignment_file(fpath)
@@ -1014,34 +1019,90 @@ def concatenate_phylip_files(input_files, output_file):
             print_warning(f"Skipping empty file during concatenation: {fpath}")
             continue
 
-        if taxa_order is None:
-            taxa_order = taxa
-            all_sequences = {t: "" for t in taxa}
-        else:
-            # Verify taxa match
-            if set(taxa) != set(taxa_order):
-                print_warning(
-                    f"Taxa mismatch in file {fpath}. "
-                    f"Expected {len(taxa_order)} taxa, found {len(taxa)}. "
-                    f"Skipping this file."
-                )
-                continue
+        seq_len = len(seqs[taxa[0]]) if taxa else 0
+        all_taxa_set.update(taxa)
+        file_data.append((seqs, seq_len, Path(fpath).stem))
 
-        seq_len = len(seqs[taxa[0]])
-        total_length += seq_len
+    if not file_data:
+        print_warning("No valid files found for concatenation.")
+        return False
+
+    if not all_taxa_set:
+        print_warning("No taxa found across input files.")
+        return False
+
+    # Establish a consistent taxa order (sorted for reproducibility)
+    taxa_order = sorted(all_taxa_set)
+
+    # Second pass: build concatenated sequences, filling gaps for missing taxa
+    all_sequences = {t: "" for t in taxa_order}
+    partitions = []  # list of (name, start, end) for partition file
+    current_pos = 1
+
+    for seqs, seq_len, file_stem in file_data:
         for taxon in taxa_order:
             if taxon in seqs:
                 all_sequences[taxon] += seqs[taxon]
             else:
-                # Fill with gaps if taxon is missing
+                # Fill with gap characters for missing taxa
                 all_sequences[taxon] += "-" * seq_len
+        partitions.append((file_stem, current_pos, current_pos + seq_len - 1))
+        current_pos += seq_len
 
-    if taxa_order is None:
-        print_warning("No valid files found for concatenation.")
-        return False
+    # Write output in relaxed non-interleaved PHYLIP format
+    _write_relaxed_phylip(all_sequences, taxa_order, output_file)
 
-    _write_alignment_file(all_sequences, taxa_order, output_file)
+    # Write partition file for IQ-TREE if requested
+    if partition_file is not None:
+        _write_iqtree_partition_file(partitions, partition_file, datatype)
+
     return True
+
+
+def _write_relaxed_phylip(sequences, taxa_order, filepath):
+    """Write a relaxed non-interleaved PHYLIP file.
+
+    Relaxed PHYLIP allows taxon names of any length (separated from sequence
+    by at least one space).
+
+    Parameters
+    ----------
+    sequences : dict
+        Sequences dict (taxon -> sequence string).
+    taxa_order : list
+        Ordered taxa list.
+    filepath : str or Path
+        Output file path.
+    """
+    filepath = Path(filepath)
+    ntaxa = len(taxa_order)
+    nchar = len(sequences[taxa_order[0]]) if taxa_order else 0
+
+    with open(filepath, "w") as f:
+        f.write(f"{ntaxa} {nchar}\n")
+        for taxon in taxa_order:
+            f.write(f"{taxon} {sequences[taxon]}\n")
+
+
+def _write_iqtree_partition_file(partitions, filepath, datatype="aa"):
+    """Write an IQ-TREE-compatible partition file.
+
+    Parameters
+    ----------
+    partitions : list of tuple
+        List of (name, start, end) tuples with 1-indexed positions.
+    filepath : str or Path
+        Output file path.
+    datatype : str
+        Data type ('aa' or 'dna').
+    """
+    filepath = Path(filepath)
+    # IQ-TREE partition format uses the model type prefix
+    dtype_prefix = "AA" if datatype == "aa" else "DNA"
+
+    with open(filepath, "w") as f:
+        for name, start, end in partitions:
+            f.write(f"{dtype_prefix}, {name} = {start}-{end}\n")
 
 
 # =============================================================================
@@ -1196,6 +1257,7 @@ def run_pipeline(params, dry_run=False, verbose=False):
             "-i", str(alignment_path),
             "-f", "phylip",
             "-d", params["datatype"],
+            "--remove-empty",
         ]
         run_command(amas_cmd, dry_run=dry_run, verbose=verbose,
                     description="Running AMAS split...", cwd=str(output_dir))
@@ -1251,6 +1313,7 @@ def run_pipeline(params, dry_run=False, verbose=False):
             "-i", str(tree1_alignment_path),
             "-f", "phylip",
             "-d", params["datatype"],
+            "--remove-empty",
         ]
         run_command(amas_cmd_tree1, dry_run=dry_run, verbose=verbose,
                     description=f"Splitting {params['tree1']['label']} portion into {params['num_partitions']} parts...",
@@ -1285,6 +1348,7 @@ def run_pipeline(params, dry_run=False, verbose=False):
             "-i", str(tree2_alignment_path),
             "-f", "phylip",
             "-d", params["datatype"],
+            "--remove-empty",
         ]
         run_command(amas_cmd_tree2, dry_run=dry_run, verbose=verbose,
                     description=f"Splitting {params['tree2']['label']} portion into {params['num_partitions']} parts...",
@@ -1452,11 +1516,18 @@ def run_pipeline(params, dry_run=False, verbose=False):
 
         if dry_run:
             print_info("[DRY RUN] Would concatenate all .phy files in combined/ directory")
+            print_info("[DRY RUN] Would generate partition file for IQ-TREE")
         elif combined_files:
             concat_output = output_dir / f"{params['output_prefix']}_{ratio_str}_concatenated.phy"
-            success = concatenate_phylip_files(combined_files, str(concat_output))
+            partition_output = output_dir / f"{params['output_prefix']}_{ratio_str}_partitions.txt"
+            success = concatenate_phylip_files(
+                combined_files, str(concat_output),
+                partition_file=str(partition_output),
+                datatype=params["datatype"],
+            )
             if success:
                 print_success(f"Concatenated alignment: {concat_output}")
+                print_success(f"Partition file (IQ-TREE): {partition_output}")
             else:
                 print_warning("Concatenation failed. Individual partition files are still available.")
         else:
@@ -1481,7 +1552,9 @@ def run_pipeline(params, dry_run=False, verbose=False):
         print(f"  Gap introduction: {params['gap_method']} mapping")
     if params["concatenate"]:
         concat_file = output_dir / f"{params['output_prefix']}_{ratio_str}_concatenated.phy"
+        partition_file = output_dir / f"{params['output_prefix']}_{ratio_str}_partitions.txt"
         print(f"  Final concatenated file: {concat_file}")
+        print(f"  IQ-TREE partition file: {partition_file}")
     print(f"{'=' * 60}")
 
 
