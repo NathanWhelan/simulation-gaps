@@ -1,0 +1,23 @@
+mkdir 70-30
+cd 70-30/
+cp ../Dataset16_Choano_Uncertain_slowestHalf* .
+nano split-file.txt
+AMAS.py split -l split-file.txt -u phylip -i Dataset16_Choano_Uncertain_slowestHalf.phy -f phylip -d aa
+mkdir cteno
+mkdir sponge
+mv Dataset16_Choano_Uncertain_slowestHalf_sponge-out.phy sponge/
+mv Dataset16_Choano_Uncertain_slowestHalf_cteno-out.phy cteno/
+cd sponge/
+five-parts-list.py 7104
+AMAS.py split -l five-split.txt -u phylip -i Dataset16_Choano_Uncertain_slowestHalf_sponge-out.phy -f phylip -d aa
+sbatch alisim_sponges_70-30.sh
+cd ../cteno/
+five-parts-list.py 16576
+AMAS.py split -l five-split.txt -u phylip -i Dataset16_Choano_Uncertain_slowestHalf_cteno-out.phy -f phylip -d aa
+sbatch alisim_ctenos_70-30.sh
+cd ..
+mkdir tree-inference
+cp cteno/D16_choano_empirical-gaps_conflict_cteno-sister_70-30_*.phy tree-inference/
+cp sponge/D16_choano_empirical-gaps_conflict_sponge-sister_70-30_*.phy tree-inference/
+cd tree-inference/
+FASconCAT-G.pl -p -p -l -s
