@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Simulation output
+sim_output/
+
+# Editor files
+*.swp
+*.swo
+*~
+.DS_Store
