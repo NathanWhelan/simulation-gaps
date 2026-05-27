@@ -243,6 +243,70 @@ python introduce_gaps_random.py simulated.fasta percentages.tsv -o output.fasta 
 python introduce_gaps_random.py simulated.phy percentages.tsv -o output.phy --summary
 ```
 
+## Grouped Missing Data (Shared Patterns)
+
+A third script, `introduce_gaps_grouped.py`, introduces missing data with **shared patterns** among specified groups of individuals. This is useful for simulating scenarios where certain taxa (e.g., closely related species or samples from the same sequencing run) tend to be missing data at the same alignment positions.
+
+### Key Features
+
+- **100% overlap mode** (`--overlap 1.0`): All group members receive gaps at exactly the same sites.
+- **Partial overlap mode** (`--overlap 0.0–0.99`): A shared base set of gap sites is selected for the group, then each individual's pattern is varied. The overlap value controls what fraction of each individual's gaps come from the shared pool.
+- **Group overlap statistics**: Use `--summary` to see Jaccard similarity and overlap coefficients between group members.
+
+### Usage
+
+```bash
+python introduce_gaps_grouped.py simulated.fasta groups.tsv -o output.fasta
+```
+
+### Groups File Format
+
+A tab-delimited file with three columns (no header required):
+
+```
+taxon1	groupA	25.0
+taxon2	groupA	30.0
+taxon3	groupB	10.0
+taxon4	groupB	15.0
+```
+
+Each line specifies: taxon name, group name, and percentage of sites (0–100) to replace with missing data.
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `alignment` | Simulated alignment with no missing data (FASTA or relaxed PHYLIP) |
+| `groups` | Tab-delimited file: taxon_name, group_name, percent_missing |
+| `-o`, `--output` | Output file path (required) |
+| `--overlap` | Fraction of gap sites shared within groups (0.0–1.0, default: 1.0) |
+| `--output-format` | Force output format: `fasta` or `phylip` (default: auto-detect) |
+| `--gap-char` | Character to use for gaps (default: `-`) |
+| `--seed` | Random seed for reproducibility |
+| `--summary` | Print missingness and group overlap statistics |
+
+### Examples
+
+```bash
+# 100% shared gaps within groups (identical gap patterns)
+python introduce_gaps_grouped.py simulated.fasta groups.tsv -o output.fasta --overlap 1.0
+
+# 80% overlap within groups (some individual variation)
+python introduce_gaps_grouped.py simulated.fasta groups.tsv -o output.fasta --overlap 0.8
+
+# Fully independent gaps (no group sharing)
+python introduce_gaps_grouped.py simulated.fasta groups.tsv -o output.fasta --overlap 0.0
+
+# With reproducibility and summary statistics
+python introduce_gaps_grouped.py simulated.fasta groups.tsv -o output.fasta --overlap 0.8 --seed 42 --summary
+```
+
+### How the Overlap Parameter Works
+
+- `--overlap 1.0`: A shared set of gap positions is selected for the group. All members receive gaps at exactly the same sites (adjusted for their individual percentages).
+- `--overlap 0.8`: 80% of each member's gap sites are drawn from a shared pool; the remaining 20% are selected independently for each individual.
+- `--overlap 0.0`: All gap sites are selected independently (equivalent to `introduce_gaps_random.py` with per-individual randomness).
+
 ## License
 
 MIT
