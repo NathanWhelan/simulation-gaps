@@ -49,15 +49,34 @@ The pipeline automates these steps:
 4. **Introduces gaps** from the empirical alignment into the simulated data
 5. **Concatenates** all simulated partitions into a final alignment
 
+### No-Alignment Mode (with Indel Model)
+
+If you don't have a starting alignment, you can specify `alignment_length` instead and optionally provide an indel model. In this mode:
+
+- AMAS.py is not required (no alignment splitting)
+- alisim uses `--length` to set the root sequence length per partition
+- Gaps are introduced naturally by the indel model during simulation
+- The `--site-freq SAMPLING` and `--site-rate SAMPLING` flags are not used
+
+```bash
+# Use the indel example config
+python simulate_conflict.py examples/params_indel_no_alignment.cfg --dry-run
+```
+
+See `examples/params_indel_no_alignment.cfg` for a fully-commented example.
+
 ### Configuration File
 
 The configuration file (`params.cfg`) uses a simple INI format. See `examples/params.cfg` for a fully-commented template.
 
 Key settings:
-- `alignment` — Your empirical alignment file (PHYLIP or FASTA)
+- `alignment` — Your empirical alignment file (PHYLIP or FASTA), or leave blank for no-alignment mode
+- `alignment_length` — Total number of sites to simulate (required when `alignment` is blank)
 - `ratio` — Signal conflict ratio (e.g., `70:30`)
 - `tree1` / `tree2` — Two competing tree topologies
 - `models` — Substitution models for each partition (e.g., `WAG+C10, 1.0, 1`)
+- `indel` — Indel model rates (e.g., `0.03,0.10` for insertion/deletion rates)
+- `indel_size` — Indel size distribution (e.g., `POW{1.7}`, `GEO{0.5}`)
 - `use_slurm` — Generate SLURM scripts for HPC clusters
 
 ### Command-Line Options

@@ -402,7 +402,7 @@ def parse_config(config_path):
     general = config["general"]
 
     # Required fields
-    required_general = ["alignment", "output_prefix", "ratio"]
+    required_general = ["output_prefix", "ratio"]
     for field in required_general:
         if field not in general or not general[field].strip():
             print_error(
@@ -411,7 +411,9 @@ def parse_config(config_path):
             )
             sys.exit(1)
 
-    params["alignment"] = general["alignment"].strip()
+    # alignment is optional if alignment_length is provided
+    params["alignment"] = general.get("alignment", "").strip()
+    params["alignment_length"] = general.get("alignment_length", "").strip()
     params["output_prefix"] = general["output_prefix"].strip()
     params["datatype"] = general.get("datatype", "aa").strip().lower()
     params["threads"] = general.get("threads", "1").strip()
@@ -422,6 +424,10 @@ def parse_config(config_path):
     params["introduce_gaps"] = general.get("introduce_gaps", "yes").strip().lower() in ("yes", "true", "1")
     params["gap_method"] = general.get("gap_method", "direct").strip().lower()
     params["concatenate"] = general.get("concatenate", "yes").strip().lower() in ("yes", "true", "1")
+
+    # Indel model parameters (optional)
+    params["indel"] = general.get("indel", "").strip()
+    params["indel_size"] = general.get("indel_size", "").strip()
 
     # Parse num_partitions
     try:
@@ -475,6 +481,51 @@ def parse_config(config_path):
             f"  Must be a positive integer."
         )
         sys.exit(1)
+
+    # Validate alignment vs alignment_length
+    if not params["alignment"] and not params["alignment_length"]:
+        print_error(
+            "You must provide either 'alignment' (path to an existing alignment)\n"
+            "  or 'alignment_length' (number of sites to simulate) in [general] section."
+        )
+        sys.exit(1)
+
+    if params["alignment_length"]:
+        try:
+            params["alignment_length"] = int(params["alignment_length"])
+            if params["alignment_length"] < 1:
+                raise ValueError()
+        except ValueError:
+            print_error(
+                f"Invalid value for 'alignment_length': '{params['alignment_length']}'\n"
+                f"  Must be a positive integer."
+            )
+            sys.exit(1)
+    else:
+        params["alignment_length"] = None
+
+    # Validate indel parameters if provided
+    if params["indel"]:
+        indel_parts = params["indel"].split(",")
+        if len(indel_parts) != 2:
+            print_error(
+                f"Invalid indel format: '{params['indel']}'\n"
+                f"  Expected format: insertion_rate,deletion_rate\n"
+                f"  Example: 0.03,0.10"
+            )
+            sys.exit(1)
+        try:
+            ins_rate = float(indel_parts[0])
+            del_rate = float(indel_parts[1])
+            if ins_rate < 0 or del_rate < 0:
+                raise ValueError()
+        except ValueError:
+            print_error(
+                f"Invalid indel rates: '{params['indel']}'\n"
+                f"  Both rates must be non-negative numbers.\n"
+                f"  Example: 0.03,0.10"
+            )
+            sys.exit(1)
 
     # --- [tree1] and [tree2] sections ---
     for tree_key in ("tree1", "tree2"):
@@ -656,7 +707,8 @@ def generate_slurm_script(script_path, commands, params, tree_label):
     os.chmod(script_path, 0o755)
 
 
-def build_alisim_command(params, partition_num, source_alignment, tree_file, tree_label):
+def build_alisim_command(params, partition_num, source_alignment, tree_file, tree_label,
+                         partition_length=None):
     """Build an alisim command for a single partition.
 
     Parameters
@@ -665,12 +717,14 @@ def build_alisim_command(params, partition_num, source_alignment, tree_file, tre
         Simulation parameters.
     partition_num : int
         Partition number (1-indexed).
-    source_alignment : str
-        Path to the source alignment for this partition.
+    source_alignment : str or None
+        Path to the source alignment for this partition. None if using --length mode.
     tree_file : str
         Path to the tree file.
     tree_label : str
         Label for the tree topology.
+    partition_length : int or None
+        Number of sites for this partition (used when source_alignment is None).
 
     Returns
     -------
@@ -701,16 +755,35 @@ def build_alisim_command(params, partition_num, source_alignment, tree_file, tre
     cmd = [
         params["iqtree"],
         "--alisim", output_name,
-        "-s", str(source_alignment),
-        "-te", str(tree_file),
-        "-m", model_with_gamma,
-        "-pre", prefix,
-        "--site-freq", "SAMPLING",
-        "--site-rate", "SAMPLING",
-        "-nt", str(params["threads"]),
-        "--seed", str(model_info["seed"]),
-        "-blfix",
     ]
+
+    if source_alignment is not None:
+        # Use source alignment for site frequencies and rates
+        cmd.extend(["-s", str(source_alignment)])
+        cmd.extend(["-te", str(tree_file)])
+        cmd.extend(["-m", model_with_gamma])
+        cmd.extend(["-pre", prefix])
+        cmd.extend(["--site-freq", "SAMPLING"])
+        cmd.extend(["--site-rate", "SAMPLING"])
+    else:
+        # No source alignment: use --length and tree
+        cmd.extend(["-t", str(tree_file)])
+        cmd.extend(["-m", model_with_gamma])
+        cmd.extend(["-pre", prefix])
+        if partition_length is not None:
+            cmd.extend(["--length", str(partition_length)])
+
+    # Add indel model if specified
+    if params.get("indel"):
+        cmd.extend(["--indel", params["indel"]])
+    if params.get("indel_size"):
+        cmd.extend(["--indel-size", params["indel_size"]])
+
+    cmd.extend(["-nt", str(params["threads"])])
+    cmd.extend(["--seed", str(model_info["seed"])])
+
+    if source_alignment is not None:
+        cmd.append("-blfix")
 
     return cmd, output_name
 
@@ -988,9 +1061,18 @@ def run_pipeline(params, dry_run=False, verbose=False):
     verbose : bool
         If True, print additional detail.
     """
+    has_alignment = bool(params["alignment"])
+
     total_steps = 7
-    if not params["introduce_gaps"]:
-        total_steps -= 1
+    if not has_alignment:
+        # Skip AMAS split steps (3 and 4) when no alignment
+        total_steps -= 2
+    if not params["introduce_gaps"] or not has_alignment:
+        # Can't introduce empirical gaps without a source alignment
+        if has_alignment and not params["introduce_gaps"]:
+            total_steps -= 1
+        elif not has_alignment:
+            total_steps -= 1
     if not params["concatenate"]:
         total_steps -= 1
 
@@ -1003,17 +1085,28 @@ def run_pipeline(params, dry_run=False, verbose=False):
     # =========================================================================
     print_step(1, total_steps, "Validating inputs")
 
-    # Check alignment file
-    alignment_path = Path(params["alignment"])
-    if not alignment_path.is_file():
-        print_error(
-            f"Alignment file not found: '{alignment_path}'\n"
-            f"  Please check the path in your params file."
-        )
-        sys.exit(1)
+    alignment_path = None
+    nsites = None
 
-    ntaxa, nsites = read_alignment_dimensions(alignment_path)
-    print_success(f"Alignment: {ntaxa} taxa, {nsites} sites ({alignment_path})")
+    if has_alignment:
+        # Check alignment file
+        alignment_path = Path(params["alignment"])
+        if not alignment_path.is_file():
+            print_error(
+                f"Alignment file not found: '{alignment_path}'\n"
+                f"  Please check the path in your params file."
+            )
+            sys.exit(1)
+
+        ntaxa, nsites = read_alignment_dimensions(alignment_path)
+        print_success(f"Alignment: {ntaxa} taxa, {nsites} sites ({alignment_path})")
+    else:
+        nsites = params["alignment_length"]
+        print_success(f"No source alignment; using alignment_length = {nsites} sites")
+        if params["indel"]:
+            print_success(f"Indel model: --indel {params['indel']}")
+        if params["indel_size"]:
+            print_success(f"Indel size distribution: --indel-size {params['indel_size']}")
 
     # Check tree files
     for tree_key in ("tree1", "tree2"):
@@ -1024,8 +1117,11 @@ def run_pipeline(params, dry_run=False, verbose=False):
     # Check tools (skip if dry run and tools might not be on this machine)
     if not dry_run:
         check_tool_available("iqtree3", params["iqtree"])
-        check_tool_available("AMAS.py", params["amas"])
-        print_success("Required tools found (iqtree3, AMAS.py)")
+        if has_alignment:
+            check_tool_available("AMAS.py", params["amas"])
+            print_success("Required tools found (iqtree3, AMAS.py)")
+        else:
+            print_success("Required tools found (iqtree3)")
     else:
         print_info("Skipping tool availability check in dry-run mode")
 
@@ -1065,190 +1161,225 @@ def run_pipeline(params, dry_run=False, verbose=False):
 
     print_success("Output directories ready")
 
-    # =========================================================================
-    # Step 3: Split alignment into two portions based on ratio
-    # =========================================================================
-    current_step += 1
-    print_step(current_step, total_steps, f"Splitting alignment by ratio ({ratio_str})")
-
     # Use absolute paths to avoid confusion with working directories
-    alignment_path = alignment_path.resolve()
+    if alignment_path is not None:
+        alignment_path = alignment_path.resolve()
     output_dir = output_dir.resolve()
     tree1_dir = tree1_dir.resolve()
     tree2_dir = tree2_dir.resolve()
     combined_dir = combined_dir.resolve()
 
-    # Create split file for AMAS
-    split_file = output_dir / "ratio_split.txt"
-    partitions_split = [
-        (params["tree1"]["label"], 1, sites_tree1),
-        (params["tree2"]["label"], sites_tree1 + 1, nsites),
-    ]
-
-    if not dry_run:
-        write_split_file(split_file, partitions_split)
-    print_info(f"Split file: {split_file}")
-
-    # Run AMAS split (run from output_dir so output lands there)
-    amas_cmd = [
-        params["amas"],
-        "split",
-        "-l", str(split_file),
-        "-u", "phylip",
-        "-i", str(alignment_path),
-        "-f", "phylip",
-        "-d", params["datatype"],
-    ]
-    run_command(amas_cmd, dry_run=dry_run, verbose=verbose,
-                description="Running AMAS split...", cwd=str(output_dir))
-
-    # AMAS outputs files with suffixes based on partition names
-    # The output filenames follow the pattern: <input_stem>_<partition_name>-out.phy
-    alignment_stem = alignment_path.stem
-    tree1_alignment_name = f"{alignment_stem}_{params['tree1']['label']}-out.phy"
-    tree2_alignment_name = f"{alignment_stem}_{params['tree2']['label']}-out.phy"
-    tree1_alignment_in_outdir = output_dir / tree1_alignment_name
-    tree2_alignment_in_outdir = output_dir / tree2_alignment_name
-
-    # Move the split files to their directories
-    if not dry_run:
-        if tree1_alignment_in_outdir.exists():
-            shutil.move(str(tree1_alignment_in_outdir), str(tree1_dir / tree1_alignment_name))
-        else:
-            print_error(
-                f"Expected AMAS output file not found: '{tree1_alignment_in_outdir}'\n"
-                f"  AMAS may have used a different naming convention.\n"
-                f"  Please check the output directory for split files."
-            )
-            sys.exit(1)
-
-        if tree2_alignment_in_outdir.exists():
-            shutil.move(str(tree2_alignment_in_outdir), str(tree2_dir / tree2_alignment_name))
-        else:
-            print_error(f"Expected AMAS output file not found: '{tree2_alignment_in_outdir}'")
-            sys.exit(1)
-
-    tree1_alignment_path = tree1_dir / tree1_alignment_name
-    tree2_alignment_path = tree2_dir / tree2_alignment_name
-
-    print_success(f"Split complete: {tree1_alignment_name} ({sites_tree1} sites), {tree2_alignment_name} ({sites_tree2} sites)")
-
     # =========================================================================
-    # Step 4: Split each portion into sub-partitions
+    # Steps 3-4: Split alignment (only when source alignment is provided)
     # =========================================================================
-    current_step += 1
-    print_step(current_step, total_steps, f"Splitting each portion into {params['num_partitions']} sub-partitions")
+    if has_alignment:
+        current_step += 1
+        print_step(current_step, total_steps, f"Splitting alignment by ratio ({ratio_str})")
 
-    # Split tree1 portion
-    tree1_ranges = divide_into_parts(sites_tree1, params["num_partitions"])
-    tree1_split_file = tree1_dir / "sub_split.txt"
-    tree1_partitions = [
-        (f"gene{i + 1}", start, end) for i, (start, end) in enumerate(tree1_ranges)
-    ]
-    if not dry_run:
-        write_split_file(tree1_split_file, tree1_partitions)
+        # Create split file for AMAS
+        split_file = output_dir / "ratio_split.txt"
+        partitions_split = [
+            (params["tree1"]["label"], 1, sites_tree1),
+            (params["tree2"]["label"], sites_tree1 + 1, nsites),
+        ]
 
-    amas_cmd_tree1 = [
-        params["amas"],
-        "split",
-        "-l", str(tree1_split_file),
-        "-u", "phylip",
-        "-i", str(tree1_alignment_path),
-        "-f", "phylip",
-        "-d", params["datatype"],
-    ]
-    run_command(amas_cmd_tree1, dry_run=dry_run, verbose=verbose,
-                description=f"Splitting {params['tree1']['label']} portion into {params['num_partitions']} parts...",
-                cwd=str(tree1_dir))
+        if not dry_run:
+            write_split_file(split_file, partitions_split)
+        print_info(f"Split file: {split_file}")
 
-    # Verify AMAS output files exist in tree1 directory
-    if not dry_run:
-        tree1_al_stem = Path(tree1_alignment_name).stem
-        for i in range(1, params["num_partitions"] + 1):
-            gene_file = tree1_dir / f"{tree1_al_stem}_gene{i}-out.phy"
-            if not gene_file.exists():
+        # Run AMAS split (run from output_dir so output lands there)
+        amas_cmd = [
+            params["amas"],
+            "split",
+            "-l", str(split_file),
+            "-u", "phylip",
+            "-i", str(alignment_path),
+            "-f", "phylip",
+            "-d", params["datatype"],
+        ]
+        run_command(amas_cmd, dry_run=dry_run, verbose=verbose,
+                    description="Running AMAS split...", cwd=str(output_dir))
+
+        # AMAS outputs files with suffixes based on partition names
+        alignment_stem = alignment_path.stem
+        tree1_alignment_name = f"{alignment_stem}_{params['tree1']['label']}-out.phy"
+        tree2_alignment_name = f"{alignment_stem}_{params['tree2']['label']}-out.phy"
+        tree1_alignment_in_outdir = output_dir / tree1_alignment_name
+        tree2_alignment_in_outdir = output_dir / tree2_alignment_name
+
+        # Move the split files to their directories
+        if not dry_run:
+            if tree1_alignment_in_outdir.exists():
+                shutil.move(str(tree1_alignment_in_outdir), str(tree1_dir / tree1_alignment_name))
+            else:
                 print_error(
-                    f"Expected sub-partition file not found: '{gene_file}'\n"
-                    f"  AMAS split may have failed."
+                    f"Expected AMAS output file not found: '{tree1_alignment_in_outdir}'\n"
+                    f"  AMAS may have used a different naming convention.\n"
+                    f"  Please check the output directory for split files."
                 )
                 sys.exit(1)
 
-    # Split tree2 portion
-    tree2_ranges = divide_into_parts(sites_tree2, params["num_partitions"])
-    tree2_split_file = tree2_dir / "sub_split.txt"
-    tree2_partitions = [
-        (f"gene{i + 1}", start, end) for i, (start, end) in enumerate(tree2_ranges)
-    ]
-    if not dry_run:
-        write_split_file(tree2_split_file, tree2_partitions)
-
-    amas_cmd_tree2 = [
-        params["amas"],
-        "split",
-        "-l", str(tree2_split_file),
-        "-u", "phylip",
-        "-i", str(tree2_alignment_path),
-        "-f", "phylip",
-        "-d", params["datatype"],
-    ]
-    run_command(amas_cmd_tree2, dry_run=dry_run, verbose=verbose,
-                description=f"Splitting {params['tree2']['label']} portion into {params['num_partitions']} parts...",
-                cwd=str(tree2_dir))
-
-    # Verify AMAS output files exist in tree2 directory
-    if not dry_run:
-        tree2_al_stem = Path(tree2_alignment_name).stem
-        for i in range(1, params["num_partitions"] + 1):
-            gene_file = tree2_dir / f"{tree2_al_stem}_gene{i}-out.phy"
-            if not gene_file.exists():
-                print_error(
-                    f"Expected sub-partition file not found: '{gene_file}'\n"
-                    f"  AMAS split may have failed."
-                )
+            if tree2_alignment_in_outdir.exists():
+                shutil.move(str(tree2_alignment_in_outdir), str(tree2_dir / tree2_alignment_name))
+            else:
+                print_error(f"Expected AMAS output file not found: '{tree2_alignment_in_outdir}'")
                 sys.exit(1)
 
-    print_success(f"Sub-partitions created for both topologies")
+        tree1_alignment_path = tree1_dir / tree1_alignment_name
+        tree2_alignment_path = tree2_dir / tree2_alignment_name
+
+        print_success(f"Split complete: {tree1_alignment_name} ({sites_tree1} sites), {tree2_alignment_name} ({sites_tree2} sites)")
+
+        # Split each portion into sub-partitions
+        current_step += 1
+        print_step(current_step, total_steps, f"Splitting each portion into {params['num_partitions']} sub-partitions")
+
+        # Split tree1 portion
+        tree1_ranges = divide_into_parts(sites_tree1, params["num_partitions"])
+        tree1_split_file = tree1_dir / "sub_split.txt"
+        tree1_partitions = [
+            (f"gene{i + 1}", start, end) for i, (start, end) in enumerate(tree1_ranges)
+        ]
+        if not dry_run:
+            write_split_file(tree1_split_file, tree1_partitions)
+
+        amas_cmd_tree1 = [
+            params["amas"],
+            "split",
+            "-l", str(tree1_split_file),
+            "-u", "phylip",
+            "-i", str(tree1_alignment_path),
+            "-f", "phylip",
+            "-d", params["datatype"],
+        ]
+        run_command(amas_cmd_tree1, dry_run=dry_run, verbose=verbose,
+                    description=f"Splitting {params['tree1']['label']} portion into {params['num_partitions']} parts...",
+                    cwd=str(tree1_dir))
+
+        # Verify AMAS output files exist in tree1 directory
+        if not dry_run:
+            tree1_al_stem = Path(tree1_alignment_name).stem
+            for i in range(1, params["num_partitions"] + 1):
+                gene_file = tree1_dir / f"{tree1_al_stem}_gene{i}-out.phy"
+                if not gene_file.exists():
+                    print_error(
+                        f"Expected sub-partition file not found: '{gene_file}'\n"
+                        f"  AMAS split may have failed."
+                    )
+                    sys.exit(1)
+
+        # Split tree2 portion
+        tree2_ranges = divide_into_parts(sites_tree2, params["num_partitions"])
+        tree2_split_file = tree2_dir / "sub_split.txt"
+        tree2_partitions = [
+            (f"gene{i + 1}", start, end) for i, (start, end) in enumerate(tree2_ranges)
+        ]
+        if not dry_run:
+            write_split_file(tree2_split_file, tree2_partitions)
+
+        amas_cmd_tree2 = [
+            params["amas"],
+            "split",
+            "-l", str(tree2_split_file),
+            "-u", "phylip",
+            "-i", str(tree2_alignment_path),
+            "-f", "phylip",
+            "-d", params["datatype"],
+        ]
+        run_command(amas_cmd_tree2, dry_run=dry_run, verbose=verbose,
+                    description=f"Splitting {params['tree2']['label']} portion into {params['num_partitions']} parts...",
+                    cwd=str(tree2_dir))
+
+        # Verify AMAS output files exist in tree2 directory
+        if not dry_run:
+            tree2_al_stem = Path(tree2_alignment_name).stem
+            for i in range(1, params["num_partitions"] + 1):
+                gene_file = tree2_dir / f"{tree2_al_stem}_gene{i}-out.phy"
+                if not gene_file.exists():
+                    print_error(
+                        f"Expected sub-partition file not found: '{gene_file}'\n"
+                        f"  AMAS split may have failed."
+                    )
+                    sys.exit(1)
+
+        print_success(f"Sub-partitions created for both topologies")
 
     # =========================================================================
-    # Step 5: Run alisim on each sub-partition
+    # Run alisim on each sub-partition (or directly with --length)
     # =========================================================================
     current_step += 1
     print_step(current_step, total_steps, "Running alisim simulations")
 
     simulated_files = {"tree1": [], "tree2": []}
 
-    for tree_key, tree_dir_path, al_stem in [
-        ("tree1", tree1_dir, Path(tree1_alignment_name).stem),
-        ("tree2", tree2_dir, Path(tree2_alignment_name).stem),
-    ]:
-        tree_label = params[tree_key]["label"]
-        tree_file = Path(params[tree_key]["file"]).resolve()
-        alisim_commands = []
+    if has_alignment:
+        # With source alignment: use sub-partition files
+        tree1_al_stem = Path(tree1_alignment_name).stem
+        tree2_al_stem = Path(tree2_alignment_name).stem
 
-        for i in range(1, params["num_partitions"] + 1):
-            source_alignment = tree_dir_path / f"{al_stem}_gene{i}-out.phy"
-            cmd, output_name = build_alisim_command(
-                params, i, source_alignment, tree_file, tree_label
-            )
-            alisim_commands.append(cmd)
+        for tree_key, tree_dir_path, al_stem in [
+            ("tree1", tree1_dir, tree1_al_stem),
+            ("tree2", tree2_dir, tree2_al_stem),
+        ]:
+            tree_label = params[tree_key]["label"]
+            tree_file = Path(params[tree_key]["file"]).resolve()
+            alisim_commands = []
 
-            # The alisim output will be: output_name.phy (in the current working dir)
-            simulated_files[tree_key].append(output_name + ".phy")
-
-        if params["slurm"]["use_slurm"]:
-            # Generate SLURM script
-            slurm_script = tree_dir_path / f"alisim_{tree_label}_{ratio_str}.sh"
-            if not dry_run:
-                generate_slurm_script(slurm_script, alisim_commands, params, tree_label)
-            print_info(f"SLURM script generated: {slurm_script}")
-            print_info(f"  Submit with: sbatch {slurm_script}")
-        else:
-            # Run commands directly
-            for i, cmd in enumerate(alisim_commands, 1):
-                run_command(
-                    cmd, dry_run=dry_run, verbose=verbose,
-                    description=f"Simulating {tree_label} partition {i}/{params['num_partitions']}..."
+            for i in range(1, params["num_partitions"] + 1):
+                source_alignment = tree_dir_path / f"{al_stem}_gene{i}-out.phy"
+                cmd, output_name = build_alisim_command(
+                    params, i, source_alignment, tree_file, tree_label
                 )
+                alisim_commands.append(cmd)
+                simulated_files[tree_key].append(output_name + ".phy")
+
+            if params["slurm"]["use_slurm"]:
+                slurm_script = tree_dir_path / f"alisim_{tree_label}_{ratio_str}.sh"
+                if not dry_run:
+                    generate_slurm_script(slurm_script, alisim_commands, params, tree_label)
+                print_info(f"SLURM script generated: {slurm_script}")
+                print_info(f"  Submit with: sbatch {slurm_script}")
+            else:
+                for i, cmd in enumerate(alisim_commands, 1):
+                    run_command(
+                        cmd, dry_run=dry_run, verbose=verbose,
+                        description=f"Simulating {tree_label} partition {i}/{params['num_partitions']}..."
+                    )
+    else:
+        # Without source alignment: use --length for each partition
+        tree1_part_ranges = divide_into_parts(sites_tree1, params["num_partitions"])
+        tree2_part_ranges = divide_into_parts(sites_tree2, params["num_partitions"])
+
+        for tree_key, tree_dir_path, part_ranges in [
+            ("tree1", tree1_dir, tree1_part_ranges),
+            ("tree2", tree2_dir, tree2_part_ranges),
+        ]:
+            tree_label = params[tree_key]["label"]
+            tree_file = Path(params[tree_key]["file"]).resolve()
+            alisim_commands = []
+
+            for i in range(1, params["num_partitions"] + 1):
+                part_start, part_end = part_ranges[i - 1]
+                part_length = part_end - part_start + 1
+                cmd, output_name = build_alisim_command(
+                    params, i, None, tree_file, tree_label,
+                    partition_length=part_length
+                )
+                alisim_commands.append(cmd)
+                simulated_files[tree_key].append(output_name + ".phy")
+
+            if params["slurm"]["use_slurm"]:
+                slurm_script = tree_dir_path / f"alisim_{tree_label}_{ratio_str}.sh"
+                if not dry_run:
+                    generate_slurm_script(slurm_script, alisim_commands, params, tree_label)
+                print_info(f"SLURM script generated: {slurm_script}")
+                print_info(f"  Submit with: sbatch {slurm_script}")
+            else:
+                for i, cmd in enumerate(alisim_commands, 1):
+                    run_command(
+                        cmd, dry_run=dry_run, verbose=verbose,
+                        description=f"Simulating {tree_label} partition {i}/{params['num_partitions']}..."
+                    )
 
     if params["slurm"]["use_slurm"]:
         print_success("SLURM scripts generated. Submit them to run simulations.")
@@ -1261,9 +1392,9 @@ def run_pipeline(params, dry_run=False, verbose=False):
         print_success("All alisim simulations complete")
 
     # =========================================================================
-    # Step 6: Introduce gaps (optional)
+    # Introduce gaps (optional, only when source alignment is available)
     # =========================================================================
-    if params["introduce_gaps"]:
+    if params["introduce_gaps"] and has_alignment:
         current_step += 1
         print_step(current_step, total_steps, "Introducing empirical gap patterns")
 
@@ -1342,7 +1473,11 @@ def run_pipeline(params, dry_run=False, verbose=False):
     print(f"  Sites per topology: {sites_tree1} ({params['tree1']['label']}), {sites_tree2} ({params['tree2']['label']})")
     print(f"  Partitions per topology: {params['num_partitions']}")
     print(f"  Models used: {', '.join(params['models'][i]['model'] for i in range(1, params['num_partitions'] + 1))}")
-    if params["introduce_gaps"]:
+    if params.get("indel"):
+        print(f"  Indel model: {params['indel']}")
+    if params.get("indel_size"):
+        print(f"  Indel size distribution: {params['indel_size']}")
+    if params["introduce_gaps"] and has_alignment:
         print(f"  Gap introduction: {params['gap_method']} mapping")
     if params["concatenate"]:
         concat_file = output_dir / f"{params['output_prefix']}_{ratio_str}_concatenated.phy"
@@ -1422,11 +1557,18 @@ For help creating a params file, see: examples/params.cfg
 
     # Print summary of parameters
     print(f"\n  {'—' * 40}")
-    print(f"  Alignment:    {params['alignment']}")
+    if params["alignment"]:
+        print(f"  Alignment:    {params['alignment']}")
+    else:
+        print(f"  Alignment:    (none - using alignment_length = {params['alignment_length']})")
     print(f"  Tree 1:       {params['tree1']['label']} ({params['tree1']['file']})")
     print(f"  Tree 2:       {params['tree2']['label']} ({params['tree2']['file']})")
     print(f"  Ratio:        {params['ratio'][0]}:{params['ratio'][1]}")
     print(f"  Partitions:   {params['num_partitions']}")
+    if params["indel"]:
+        print(f"  Indel:        {params['indel']}")
+    if params["indel_size"]:
+        print(f"  Indel size:   {params['indel_size']}")
     print(f"  Output:       {params['output_dir']}/")
     print(f"  {'—' * 40}")
 
