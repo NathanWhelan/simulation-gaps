@@ -1,6 +1,72 @@
 # simulation-gaps
 
-Introduce realistic missing data (gaps) into simulated phylogenetic sequence alignments by copying the gap pattern from an empirical (reference) alignment.
+Tools for simulating phylogenetic data with realistic missing data patterns and signal conflict using IQ-TREE's alisim.
+
+## Overview
+
+This repository provides:
+
+1. **`simulate_conflict.py`** — An automated pipeline for simulating phylogenetic data with conflicting signal using alisim (IQ-TREE). Reads a simple configuration file and handles all steps automatically.
+2. **`introduce_gaps.py`** — Transfer per-site gap patterns from an empirical alignment to a simulated alignment.
+3. **`introduce_gaps_random.py`** — Introduce random missing data on a per-individual basis using specified percentages.
+4. **`five-parts-list.py`** — Utility to divide an alignment into equal partitions.
+
+## Quick Start: Signal-Conflict Simulation Pipeline
+
+The main script `simulate_conflict.py` automates the entire signal-conflict simulation workflow.
+
+### Requirements
+
+- Python 3.7+ (no external Python packages needed)
+- [IQ-TREE 3](https://github.com/iqtree/iqtree3) (with alisim support)
+- [AMAS](https://github.com/marekborowiec/AMAS) (`pip install amas`)
+
+### Usage
+
+```bash
+# 1. Copy and edit the example configuration file
+cp examples/params.cfg my_simulation.cfg
+# Edit my_simulation.cfg with your alignment, trees, models, etc.
+
+# 2. Preview what the script will do (recommended first!)
+python simulate_conflict.py my_simulation.cfg --dry-run
+
+# 3. Run the full pipeline
+python simulate_conflict.py my_simulation.cfg
+
+# 4. For SLURM clusters, set use_slurm = yes in the config file
+#    The script will generate SLURM batch scripts instead of running directly
+python simulate_conflict.py my_simulation.cfg
+```
+
+### What It Does
+
+The pipeline automates these steps:
+
+1. **Splits** the input alignment into two portions based on a ratio (e.g., 70:30)
+2. **Sub-divides** each portion into multiple partitions (default: 5)
+3. **Simulates** data on each partition using alisim with different evolutionary models and specified tree topologies
+4. **Introduces gaps** from the empirical alignment into the simulated data
+5. **Concatenates** all simulated partitions into a final alignment
+
+### Configuration File
+
+The configuration file (`params.cfg`) uses a simple INI format. See `examples/params.cfg` for a fully-commented template.
+
+Key settings:
+- `alignment` — Your empirical alignment file (PHYLIP or FASTA)
+- `ratio` — Signal conflict ratio (e.g., `70:30`)
+- `tree1` / `tree2` — Two competing tree topologies
+- `models` — Substitution models for each partition (e.g., `WAG+C10, 1.0, 1`)
+- `use_slurm` — Generate SLURM scripts for HPC clusters
+
+### Command-Line Options
+
+| Flag | Description |
+|------|-------------|
+| `--dry-run` | Preview all commands without running anything |
+| `--verbose` | Show detailed progress and commands |
+| `--post-simulation` | Run only gap-introduction and concatenation (after SLURM jobs finish) |
 
 ## Motivation
 
@@ -15,7 +81,8 @@ This tool solves that problem by transferring the **per-site missingness pattern
 ## Requirements
 
 - Python 3.7+
-- No external dependencies (uses only the Python standard library)
+- No external Python packages (uses only the standard library)
+- For the full pipeline: IQ-TREE 3 and AMAS
 
 ## Installation
 
