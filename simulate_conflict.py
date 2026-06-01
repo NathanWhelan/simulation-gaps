@@ -33,6 +33,7 @@ import argparse
 import configparser
 import math
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -420,7 +421,18 @@ def parse_config(config_path):
     params["iqtree"] = general.get("iqtree", "iqtree3").strip()
     params["amas"] = general.get("amas", "AMAS.py").strip()
     params["output_dir"] = general.get("output_dir", "sim_output").strip()
-    params["seed_base"] = general.get("seed_base", "").strip()
+    seed_base_str = general.get("seed_base", "").strip()
+    if seed_base_str:
+        try:
+            params["seed_base"] = int(seed_base_str)
+        except ValueError:
+            print_error(
+                f"Invalid value for 'seed_base': '{seed_base_str}'\n"
+                f"  Must be an integer."
+            )
+            sys.exit(1)
+    else:
+        params["seed_base"] = None
     params["introduce_gaps"] = general.get("introduce_gaps", "yes").strip().lower() in ("yes", "true", "1")
     params["gap_method"] = general.get("gap_method", "direct").strip().lower()
     params["concatenate"] = general.get("concatenate", "yes").strip().lower() in ("yes", "true", "1")
@@ -577,11 +589,12 @@ def parse_config(config_path):
             continue
 
         parts = [p.strip() for p in value.split(",")]
-        if len(parts) != 3:
+        if len(parts) < 2 or len(parts) > 3:
             print_error(
                 f"Invalid model specification for partition {part_num}: '{value}'\n"
-                f"  Expected format: model, gamma_shape, seed\n"
-                f"  Example: WAG+C10, 1.0, 1"
+                f"  Expected format: model, gamma_shape[, seed]\n"
+                f"  Example: WAG+C10, 1.0, 1\n"
+                f"  The seed is optional; if omitted, one will be auto-generated."
             )
             sys.exit(1)
 
@@ -601,14 +614,16 @@ def parse_config(config_path):
             )
             sys.exit(1)
 
-        try:
-            seed = int(parts[2])
-        except ValueError:
-            print_error(
-                f"Invalid seed for partition {part_num}: '{parts[2]}'\n"
-                f"  Must be an integer."
-            )
-            sys.exit(1)
+        seed = None
+        if len(parts) == 3 and parts[2]:
+            try:
+                seed = int(parts[2])
+            except ValueError:
+                print_error(
+                    f"Invalid seed for partition {part_num}: '{parts[2]}'\n"
+                    f"  Must be an integer (or omit to auto-generate)."
+                )
+                sys.exit(1)
 
         models[part_num] = {
             "model": model_name,
@@ -627,6 +642,21 @@ def parse_config(config_path):
             sys.exit(1)
 
     params["models"] = models
+
+    # --- Resolve seeds for all partitions ---
+    # Priority: per-partition seed > seed_base-derived > random
+    seed_base = params["seed_base"]
+    seeds_auto_generated = False
+    for i in range(1, params["num_partitions"] + 1):
+        if models[i]["seed"] is None:
+            if seed_base is not None:
+                # Derive seed from seed_base + partition number
+                models[i]["seed"] = seed_base + i
+            else:
+                # Generate a random seed
+                models[i]["seed"] = random.randint(1, 2**31 - 1)
+                seeds_auto_generated = True
+    params["seeds_auto_generated"] = seeds_auto_generated
 
     # --- [slurm] section (optional) ---
     params["slurm"] = {"use_slurm": False}
@@ -1407,7 +1437,8 @@ def run_pipeline(params, dry_run=False, verbose=False):
                 for i, cmd in enumerate(alisim_commands, 1):
                     run_command(
                         cmd, dry_run=dry_run, verbose=verbose,
-                        description=f"Simulating {tree_label} partition {i}/{params['num_partitions']}..."
+                        description=f"Simulating {tree_label} partition {i}/{params['num_partitions']}...",
+                        cwd=str(tree_dir_path),
                     )
     else:
         # Without source alignment: use --length for each partition
@@ -1442,7 +1473,8 @@ def run_pipeline(params, dry_run=False, verbose=False):
                 for i, cmd in enumerate(alisim_commands, 1):
                     run_command(
                         cmd, dry_run=dry_run, verbose=verbose,
-                        description=f"Simulating {tree_label} partition {i}/{params['num_partitions']}..."
+                        description=f"Simulating {tree_label} partition {i}/{params['num_partitions']}...",
+                        cwd=str(tree_dir_path),
                     )
 
     if params["slurm"]["use_slurm"]:
@@ -1544,6 +1576,10 @@ def run_pipeline(params, dry_run=False, verbose=False):
     print(f"  Sites per topology: {sites_tree1} ({params['tree1']['label']}), {sites_tree2} ({params['tree2']['label']})")
     print(f"  Partitions per topology: {params['num_partitions']}")
     print(f"  Models used: {', '.join(params['models'][i]['model'] for i in range(1, params['num_partitions'] + 1))}")
+    seeds_str = ', '.join(str(params['models'][i]['seed']) for i in range(1, params['num_partitions'] + 1))
+    print(f"  Seeds used: {seeds_str}")
+    if params.get("seeds_auto_generated"):
+        print(f"  {COLORS.YELLOW}NOTE:{COLORS.RESET} Seeds were auto-generated. Record them above for reproducibility.")
     if params.get("indel"):
         print(f"  Indel model: {params['indel']}")
     if params.get("indel_size"):
