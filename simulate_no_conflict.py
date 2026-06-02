@@ -979,8 +979,8 @@ def build_alisim_command(params, partition_num, source_alignment, tree_file,
         gamma_str = f"{gamma_val:g}".replace(".", "")
     model_label = model_info["model"].replace(".", "") + "+G" + gamma_str
 
-    # Output name
-    output_name = f"{params['output_prefix']}_{tree_label}_{model_label}"
+    # Output name (includes partition number to avoid collisions with duplicate models)
+    output_name = f"{params['output_prefix']}_{tree_label}_p{partition_num}_{model_label}"
     prefix = output_name
 
     cmd = [
@@ -1468,6 +1468,8 @@ def run_pipeline(params, dry_run=False, verbose=False):
 
     tree_file = Path(params["tree"]["file"]).resolve()
     simulated_files = []
+    # Track source sub-partitions for gap introduction (maps sim filename -> source alignment path)
+    source_partitions = []
     alisim_commands = []
 
     if has_alignment:
@@ -1493,6 +1495,7 @@ def run_pipeline(params, dry_run=False, verbose=False):
             )
             alisim_commands.append(cmd)
             simulated_files.append(output_name + ".phy")
+            source_partitions.append(source_alignment)
     else:
         # Without source alignment: use --length for each partition
         part_ranges = divide_into_parts(nsites, params["num_partitions"])
@@ -1535,7 +1538,7 @@ def run_pipeline(params, dry_run=False, verbose=False):
         current_step += 1
         print_step(current_step, total_steps, "Introducing empirical gap patterns")
 
-        for sim_file in simulated_files:
+        for idx, sim_file in enumerate(simulated_files):
             sim_path = Path(sim_file)
             if not sim_path.exists():
                 sim_path = sim_dir / sim_file
@@ -1543,10 +1546,14 @@ def run_pipeline(params, dry_run=False, verbose=False):
                 print_warning(f"Simulated file not found: {sim_file}. Skipping gap introduction.")
                 continue
 
+            # Use the corresponding source sub-partition as the gap reference
+            # (not the full alignment) so each partition gets the correct gap pattern
+            ref_path = source_partitions[idx]
+
             output_gap_file = combined_dir / sim_path.name
             if not dry_run:
                 success = introduce_gaps_into_alignment(
-                    str(alignment_path),
+                    str(ref_path),
                     str(sim_path),
                     str(output_gap_file),
                     method=params["gap_method"],
