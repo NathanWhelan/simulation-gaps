@@ -309,6 +309,238 @@ def validate_tree_file(filepath):
         )
 
 
+def get_taxa_with_all_missing(filepath):
+    """Identify taxa that are completely missing or have all missing data in an alignment.
+
+    A taxon is considered "all missing" if every character in its sequence is a
+    gap or missing-data character (-, ?, X, x).
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Path to the alignment file.
+
+    Returns
+    -------
+    set of str
+        Set of taxon names that have all missing data.
+    """
+    seqs, taxa = _parse_alignment_file(filepath)
+    if not seqs:
+        return set()
+
+    gap_chars = set("-?Xx")
+    missing_taxa = set()
+    for taxon in taxa:
+        seq = seqs[taxon]
+        if not seq or all(c in gap_chars for c in seq):
+            missing_taxa.add(taxon)
+
+    return missing_taxa
+
+
+def prune_taxa_from_newick(newick_str, taxa_to_remove):
+    """Remove specified taxa from a Newick tree string.
+
+    This is a pure-Python implementation analogous to ape::drop.tip() in R.
+    It parses the Newick tree, removes the specified tips, suppresses internal
+    nodes that become unifurcations, and returns the resulting Newick string.
+
+    Parameters
+    ----------
+    newick_str : str
+        Newick-format tree string (with or without trailing semicolon).
+    taxa_to_remove : set or list
+        Collection of taxon names to remove from the tree.
+
+    Returns
+    -------
+    str
+        Pruned Newick tree string (with trailing semicolon).
+    """
+    taxa_to_remove = set(taxa_to_remove)
+    if not taxa_to_remove:
+        return newick_str
+
+    # Parse into a simple nested structure
+    tree = _parse_newick(newick_str.strip().rstrip(";"))
+    # Prune
+    pruned = _prune_node(tree, taxa_to_remove)
+    if pruned is None:
+        print_warning("All taxa were removed from the tree during pruning.")
+        return "();"
+    # Serialize back
+    return _serialize_newick(pruned) + ";"
+
+
+def _parse_newick(s):
+    """Parse a Newick string into a nested dict structure.
+
+    Returns a node dict with keys:
+        'children': list of child nodes (empty for tips)
+        'name': node/tip label (str or '')
+        'branch_length': branch length string (str or '')
+    """
+    s = s.strip()
+    node = {"children": [], "name": "", "branch_length": ""}
+
+    if not s or s == ";":
+        return node
+
+    # Find the top-level structure
+    if s.startswith("("):
+        # Find matching closing paren
+        depth = 0
+        close_idx = -1
+        for i, c in enumerate(s):
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    close_idx = i
+                    break
+
+        # Parse children from inside parentheses
+        children_str = s[1:close_idx]
+        # Split at top-level commas
+        children_parts = _split_newick_children(children_str)
+        for part in children_parts:
+            child = _parse_newick(part)
+            node["children"].append(child)
+
+        # Parse label and branch length after the closing paren
+        remainder = s[close_idx + 1:]
+        name, bl = _parse_label_and_bl(remainder)
+        node["name"] = name
+        node["branch_length"] = bl
+    else:
+        # It's a tip
+        name, bl = _parse_label_and_bl(s)
+        node["name"] = name
+        node["branch_length"] = bl
+
+    return node
+
+
+def _split_newick_children(s):
+    """Split a Newick children string at top-level commas."""
+    parts = []
+    depth = 0
+    current = []
+    for c in s:
+        if c == "(":
+            depth += 1
+            current.append(c)
+        elif c == ")":
+            depth -= 1
+            current.append(c)
+        elif c == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(c)
+    if current:
+        parts.append("".join(current))
+    return parts
+
+
+def _parse_label_and_bl(s):
+    """Parse a label and optional branch length from a Newick fragment like 'name:0.1'."""
+    s = s.strip()
+    if ":" in s:
+        idx = s.rfind(":")
+        name = s[:idx].strip()
+        bl = s[idx:]  # includes the colon
+        return name, bl
+    else:
+        return s, ""
+
+
+def _prune_node(node, taxa_to_remove):
+    """Recursively prune taxa from a parsed Newick tree.
+
+    Returns None if the entire subtree should be removed.
+    Suppresses unifurcations (nodes with exactly one child).
+    """
+    if not node["children"]:
+        # Tip node
+        if node["name"] in taxa_to_remove:
+            return None
+        return node
+
+    # Internal node: recurse on children
+    new_children = []
+    for child in node["children"]:
+        pruned_child = _prune_node(child, taxa_to_remove)
+        if pruned_child is not None:
+            new_children.append(pruned_child)
+
+    if not new_children:
+        # All children removed
+        return None
+
+    if len(new_children) == 1:
+        # Suppress unifurcation: merge branch lengths
+        child = new_children[0]
+        # Combine branch lengths
+        parent_bl = node["branch_length"]
+        child_bl = child["branch_length"]
+        if parent_bl and child_bl:
+            # Both have branch lengths - add them
+            try:
+                parent_val = float(parent_bl.lstrip(":"))
+                child_val = float(child_bl.lstrip(":"))
+                child["branch_length"] = f":{parent_val + child_val}"
+            except ValueError:
+                # Can't parse, just keep child's branch length
+                pass
+        elif parent_bl and not child_bl:
+            child["branch_length"] = parent_bl
+        # If only child has bl, keep it as is
+        return child
+
+    node["children"] = new_children
+    return node
+
+
+def _serialize_newick(node):
+    """Serialize a parsed Newick node back to a string."""
+    if not node["children"]:
+        return node["name"] + node["branch_length"]
+
+    children_str = ",".join(_serialize_newick(c) for c in node["children"])
+    return f"({children_str}){node['name']}{node['branch_length']}"
+
+
+def write_pruned_tree(original_tree_path, taxa_to_remove, output_tree_path):
+    """Read a tree, prune specified taxa, and write the result.
+
+    Parameters
+    ----------
+    original_tree_path : str or Path
+        Path to the original Newick tree file.
+    taxa_to_remove : set
+        Taxa to remove from the tree.
+    output_tree_path : str or Path
+        Path to write the pruned tree.
+
+    Returns
+    -------
+    str
+        Path to the pruned tree file.
+    """
+    with open(original_tree_path, "r") as f:
+        newick_str = f.read().strip()
+
+    pruned = prune_taxa_from_newick(newick_str, taxa_to_remove)
+
+    with open(output_tree_path, "w") as f:
+        f.write(pruned + "\n")
+
+    return str(output_tree_path)
+
+
 def divide_into_parts(total, num_parts):
     """Divide a number into approximately equal parts.
 
@@ -1242,8 +1474,22 @@ def run_pipeline(params, dry_run=False, verbose=False):
         alignment_stem = alignment_path.stem
         for i in range(1, params["num_partitions"] + 1):
             source_alignment = sim_dir / f"{alignment_stem}_gene{i}-out.phy"
+
+            # Check for taxa with all missing data and prune them from the tree
+            gene_tree_file = tree_file
+            if not dry_run and source_alignment.exists():
+                missing_taxa = get_taxa_with_all_missing(source_alignment)
+                if missing_taxa:
+                    pruned_tree_path = sim_dir / f"gene{i}_{tree_label}_pruned.tre"
+                    write_pruned_tree(tree_file, missing_taxa, pruned_tree_path)
+                    gene_tree_file = pruned_tree_path
+                    print_info(
+                        f"Gene {i} ({tree_label}): dropped {len(missing_taxa)} taxa "
+                        f"with all missing data: {', '.join(sorted(missing_taxa))}"
+                    )
+
             cmd, output_name = build_alisim_command(
-                params, i, source_alignment, tree_file
+                params, i, source_alignment, gene_tree_file
             )
             alisim_commands.append(cmd)
             simulated_files.append(output_name + ".phy")
