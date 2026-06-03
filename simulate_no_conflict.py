@@ -33,6 +33,7 @@ import argparse
 import configparser
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -65,6 +66,11 @@ class Colors:
 
 
 COLORS = Colors()
+
+SUPERMATRIX_PREFIX = "FcC_supermatrix"
+SUPERMATRIX_PHY_FILENAME = f"{SUPERMATRIX_PREFIX}.phy"
+SUPERMATRIX_FASTA_FILENAME = f"{SUPERMATRIX_PREFIX}.fas"
+SUPERMATRIX_PARTITION_FILENAME = f"{SUPERMATRIX_PREFIX}_partition.txt"
 
 
 # =============================================================================
@@ -1209,7 +1215,19 @@ def _write_alignment_file(sequences, taxa_order, filepath):
                     f.write(seq[i:i + 80] + "\n")
 
 
-def concatenate_phylip_files(input_files, output_file, partition_file=None, datatype="aa"):
+def _natural_sort_key(value):
+    """Return a natural-sort key for filenames."""
+    parts = re.split(r"(\d+)", str(value))
+    return [int(part) if part.isdigit() else part.lower() for part in parts]
+
+
+def concatenate_phylip_files(
+    input_files,
+    output_file,
+    fasta_output_file=None,
+    partition_file=None,
+    datatype="aa",
+):
     """Concatenate multiple alignment files, handling missing taxa.
 
     Taxa do not need to be present in all files. Missing taxa will be filled
@@ -1222,6 +1240,8 @@ def concatenate_phylip_files(input_files, output_file, partition_file=None, data
         Paths to the alignment files to concatenate.
     output_file : str or Path
         Path for the concatenated output (relaxed non-interleaved PHYLIP).
+    fasta_output_file : str or Path or None
+        If provided, also write the concatenated alignment in FASTA format.
     partition_file : str or Path or None
         If provided, write an IQ-TREE-compatible partition file.
     datatype : str
@@ -1236,6 +1256,8 @@ def concatenate_phylip_files(input_files, output_file, partition_file=None, data
         print_warning("No files to concatenate.")
         return False
 
+    input_files = sorted((Path(fpath) for fpath in input_files), key=lambda path: _natural_sort_key(path.name))
+
     # First pass: collect the union of all taxa across all files
     all_taxa_set = set()
     file_data = []
@@ -1246,7 +1268,18 @@ def concatenate_phylip_files(input_files, output_file, partition_file=None, data
             print_warning(f"Skipping empty file during concatenation: {fpath}")
             continue
 
-        seq_len = len(seqs[taxa[0]]) if taxa else 0
+        seq_lengths = {len(seq) for seq in seqs.values()}
+        if len(seq_lengths) > 1:
+            print_warning(
+                f"Skipping file with inconsistent sequence lengths during concatenation: {fpath}"
+            )
+            continue
+
+        seq_len = next(iter(seq_lengths), 0)
+        if seq_len == 0:
+            print_warning(f"Skipping zero-length file during concatenation: {fpath}")
+            continue
+
         all_taxa_set.update(taxa)
         file_data.append((seqs, seq_len, Path(fpath).stem))
 
@@ -1277,6 +1310,8 @@ def concatenate_phylip_files(input_files, output_file, partition_file=None, data
 
     # Write output in relaxed non-interleaved PHYLIP format
     _write_relaxed_phylip(all_sequences, taxa_order, output_file)
+    if fasta_output_file is not None:
+        _write_alignment_file(all_sequences, taxa_order, fasta_output_file)
 
     # Write partition file for IQ-TREE if requested
     if partition_file is not None:
@@ -1587,17 +1622,20 @@ def run_pipeline(params, dry_run=False, verbose=False):
 
         if dry_run:
             print_info("[DRY RUN] Would concatenate all .phy files in combined/ directory")
-            print_info("[DRY RUN] Would generate partition file for IQ-TREE")
+            print_info(f"[DRY RUN] Would write {SUPERMATRIX_PHY_FILENAME}, {SUPERMATRIX_FASTA_FILENAME}, and {SUPERMATRIX_PARTITION_FILENAME}")
         elif combined_files:
-            concat_output = output_dir / f"{params['output_prefix']}_{tree_label}_concatenated.phy"
-            partition_output = output_dir / f"{params['output_prefix']}_{tree_label}_partitions.txt"
+            concat_output = output_dir / SUPERMATRIX_PHY_FILENAME
+            fasta_output = output_dir / SUPERMATRIX_FASTA_FILENAME
+            partition_output = output_dir / SUPERMATRIX_PARTITION_FILENAME
             success = concatenate_phylip_files(
                 combined_files, str(concat_output),
+                fasta_output_file=str(fasta_output),
                 partition_file=str(partition_output),
                 datatype=params["datatype"],
             )
             if success:
                 print_success(f"Concatenated alignment: {concat_output}")
+                print_success(f"Concatenated FASTA alignment: {fasta_output}")
                 print_success(f"Partition file (IQ-TREE): {partition_output}")
             else:
                 print_warning("Concatenation failed. Individual partition files are still available.")
@@ -1626,9 +1664,11 @@ def run_pipeline(params, dry_run=False, verbose=False):
     if params["introduce_gaps"] and has_alignment:
         print(f"  Gap introduction: {params['gap_method']} mapping")
     if params["concatenate"]:
-        concat_file = output_dir / f"{params['output_prefix']}_{tree_label}_concatenated.phy"
-        partition_file = output_dir / f"{params['output_prefix']}_{tree_label}_partitions.txt"
+        concat_file = output_dir / SUPERMATRIX_PHY_FILENAME
+        fasta_file = output_dir / SUPERMATRIX_FASTA_FILENAME
+        partition_file = output_dir / SUPERMATRIX_PARTITION_FILENAME
         print(f"  Final concatenated file: {concat_file}")
+        print(f"  Final concatenated FASTA file: {fasta_file}")
         print(f"  IQ-TREE partition file: {partition_file}")
     print(f"{'=' * 60}")
 
