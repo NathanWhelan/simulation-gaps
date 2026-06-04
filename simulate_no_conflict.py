@@ -345,6 +345,26 @@ def get_taxa_with_all_missing(filepath):
     return missing_taxa
 
 
+def _collect_tip_labels(node, taxa):
+    """Recursively collect all tip labels from a parsed Newick node."""
+    if not node["children"]:
+        if node["name"]:
+            taxa.add(node["name"])
+    else:
+        for child in node["children"]:
+            _collect_tip_labels(child, taxa)
+
+
+def get_taxa_from_tree_file(tree_path):
+    """Return the set of tip labels present in a Newick tree file."""
+    with open(tree_path, "r") as f:
+        newick_str = f.read().strip()
+    tree = _parse_newick(newick_str.rstrip(";"))
+    taxa = set()
+    _collect_tip_labels(tree, taxa)
+    return taxa
+
+
 def prune_taxa_from_newick(newick_str, taxa_to_remove):
     """Remove specified taxa from a Newick tree string.
 
@@ -1515,17 +1535,21 @@ def run_pipeline(params, dry_run=False, verbose=False):
         for i in range(1, params["num_partitions"] + 1):
             source_alignment = sim_dir / f"{alignment_stem}_gene{i}-out.phy"
 
-            # Check for taxa with all missing data and prune them from the tree
+            # Check for taxa in the tree that are absent from the sub-partition alignment
+            # (e.g. removed by AMAS --remove-empty) and prune them from the tree
             gene_tree_file = tree_file
             if not dry_run and source_alignment.exists():
-                missing_taxa = get_taxa_with_all_missing(source_alignment)
+                _, alignment_taxa = _parse_alignment_file(source_alignment)
+                alignment_taxa_set = set(alignment_taxa)
+                tree_taxa = get_taxa_from_tree_file(tree_file)
+                missing_taxa = tree_taxa - alignment_taxa_set
                 if missing_taxa:
                     pruned_tree_path = sim_dir / f"gene{i}_{tree_label}_pruned.tre"
                     write_pruned_tree(tree_file, missing_taxa, pruned_tree_path)
                     gene_tree_file = pruned_tree_path
                     print_info(
                         f"Gene {i} ({tree_label}): dropped {len(missing_taxa)} taxa "
-                        f"with all missing data: {', '.join(sorted(missing_taxa))}"
+                        f"absent from sub-partition: {', '.join(sorted(missing_taxa))}"
                     )
 
             cmd, output_name = build_alisim_command(
