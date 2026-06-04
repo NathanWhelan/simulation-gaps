@@ -672,6 +672,7 @@ def parse_config(config_path):
         params["seed_base"] = None
     params["introduce_gaps"] = general.get("introduce_gaps", "yes").strip().lower() in ("yes", "true", "1")
     params["gap_method"] = general.get("gap_method", "direct").strip().lower()
+    params["no_copy_gaps"] = general.get("no_copy_gaps", "no").strip().lower() in ("yes", "true", "1")
     params["concatenate"] = general.get("concatenate", "yes").strip().lower() in ("yes", "true", "1")
 
     # Indel model parameters (optional)
@@ -1021,6 +1022,8 @@ def build_alisim_command(params, partition_num, source_alignment, tree_file,
 
     if source_alignment is not None:
         cmd.append("-blfix")
+        if params.get("no_copy_gaps"):
+            cmd.append("--no-copy-gaps")
 
     return cmd, output_name
 
@@ -1663,6 +1666,8 @@ def run_pipeline(params, dry_run=False, verbose=False):
         print(f"  Indel size distribution: {params['indel_size']}")
     if params["introduce_gaps"] and has_alignment:
         print(f"  Gap introduction: {params['gap_method']} mapping")
+    if params.get("no_copy_gaps") and has_alignment:
+        print(f"  No-copy-gaps: enabled (--no-copy-gaps)")
     if params["concatenate"]:
         concat_file = output_dir / SUPERMATRIX_PHY_FILENAME
         fasta_file = output_dir / SUPERMATRIX_FASTA_FILENAME
