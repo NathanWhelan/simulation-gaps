@@ -1495,6 +1495,25 @@ def run_pipeline(params, dry_run=False, verbose=False):
         validate_tree_file(tree_path)
         print_success(f"{tree_key}: {params[tree_key]['label']} ({tree_path})")
 
+    # Warn about taxa present in either tree but absent from the source alignment.
+    # Such taxa will be pruned from both trees before alisim runs, so any
+    # conflict in their placement (e.g. a controversial taxon like Xenoturbella)
+    # will NOT be preserved in the simulation.
+    if has_alignment:
+        alignment_taxa = set(_parse_alignment_file(alignment_path)[1])
+        for tree_key in ("tree1", "tree2"):
+            tree_path = Path(params[tree_key]["file"])
+            tree_taxa = get_taxa_from_tree_file(tree_path)
+            unseen = tree_taxa - alignment_taxa
+            if unseen:
+                print_warning(
+                    f"{tree_key} ({params[tree_key]['label']}) contains "
+                    f"{len(unseen)} taxon/taxa not found in the source alignment:\n"
+                    f"    {', '.join(sorted(unseen))}\n"
+                    f"  These will be pruned from the tree before simulation. "
+                    f"Any conflicting placement for these taxa will NOT be simulated."
+                )
+
     # Check tools (skip if dry run and tools might not be on this machine)
     if not dry_run:
         check_tool_available("iqtree3", params["iqtree"])

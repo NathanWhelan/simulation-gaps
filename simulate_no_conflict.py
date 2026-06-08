@@ -1429,6 +1429,22 @@ def run_pipeline(params, dry_run=False, verbose=False):
     validate_tree_file(tree_path)
     print_success(f"Tree: {tree_label} ({tree_path})")
 
+    # Warn about taxa present in the tree but absent from the source alignment.
+    # Such taxa will be pruned from the tree before alisim runs and will not
+    # appear in the simulated output.
+    if has_alignment:
+        alignment_taxa = set(_parse_alignment_file(alignment_path)[1])
+        tree_taxa = get_taxa_from_tree_file(tree_path)
+        unseen = tree_taxa - alignment_taxa
+        if unseen:
+            print_warning(
+                f"Tree ({tree_label}) contains {len(unseen)} taxon/taxa not found "
+                f"in the source alignment:\n"
+                f"    {', '.join(sorted(unseen))}\n"
+                f"  These will be pruned from the tree before simulation and will "
+                f"not appear in the simulated output."
+            )
+
     # Check tools
     if not dry_run:
         check_tool_available("iqtree3", params["iqtree"])
